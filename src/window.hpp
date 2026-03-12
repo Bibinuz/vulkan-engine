@@ -1,10 +1,10 @@
 #pragma once
 
+#include "vulkan/vulkan_handles.hpp"
 #include <GLFW/glfw3.h> 
 #include <glm/vec2.hpp>
 #include <vulkan/vulkan.hpp>
 #include <memory>
-#include <span>
 
 namespace lvk::glfw {
 struct Deleter {
@@ -13,5 +13,9 @@ struct Deleter {
 
 using Window = std::unique_ptr<GLFWwindow, Deleter>;
 [[nodiscard]] auto create_window(glm::ivec2 size, char const* title) -> Window;
+  
+[[nodiscard]] auto instance_extensions() -> std::span<char const* const>;
+
+auto create_surface(GLFWwindow* window, vk::Instance const instance) -> vk::UniqueSurfaceKHR ;
 
 } // End namespace lvk::glfw
