@@ -16,6 +16,8 @@ using Window = std::unique_ptr<GLFWwindow, Deleter>;
   
 [[nodiscard]] auto instance_extensions() -> std::span<char const* const>;
 
-auto create_surface(GLFWwindow* window, vk::Instance const instance) -> vk::UniqueSurfaceKHR ;
+[[nodiscard]] auto create_surface(GLFWwindow* window, vk::Instance const instance) -> vk::UniqueSurfaceKHR ;
+
+[[nodiscard]] auto framebuffer_size(GLFWwindow* window) -> glm::ivec2;
 
 } // End namespace lvk::glfw

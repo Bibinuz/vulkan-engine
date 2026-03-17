@@ -48,4 +48,10 @@ auto glfw::create_surface(GLFWwindow *window, const vk::Instance instance) -> vk
   return vk::UniqueSurfaceKHR{ret, instance};
 }
 
+auto glfw::framebuffer_size(GLFWwindow *window) -> glm::ivec2 {
+  auto ret = glm::ivec2{};
+  glfwGetFramebufferSize(window, &ret.x, &ret.y);
+  return ret;
+}
+
 } // End namespace lvk
