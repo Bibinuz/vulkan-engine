@@ -17,6 +17,7 @@ auto glfw::create_window(glm::ivec2 size, const char *title) -> Window {
     std::println(stderr, "[GLFW] Error {}: {}", code, description);
   };
   glfwSetErrorCallback(on_error);
+
   if (glfwInit() != GLFW_TRUE) {
     throw std::runtime_error{"Failed to initialize GLFW"};
   }

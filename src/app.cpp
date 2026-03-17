@@ -1,14 +1,19 @@
 #include "app.hpp"
 #include "vulkan/vulkan.hpp"
 #include "vulkan/vulkan_core.h"
+#include "vulkan/vulkan_enums.hpp"
+#include "vulkan/vulkan_handles.hpp"
 #include "vulkan/vulkan_structs.hpp"
 #include "window.hpp"
 #include <GLFW/glfw3.h>
+#include <cstdint>
 #include <print>
 #include <string_view>
 #include <vulkan/vulkan_hpp_macros.hpp>
 #include "gpu.hpp"
 #include <ranges>
+#include <chrono>
+#include <imgui.h>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
@@ -23,6 +28,7 @@ void App::run() {
   create_device();
   create_swapchain();
   create_render_sync();
+  create_imgui();
   main_loop();
 }
 
@@ -117,9 +123,157 @@ void App::create_render_sync() {
   }
 }
 
+auto App::acquire_render_target() -> bool {
+  m_framebuffer_size = glfw::framebuffer_size(m_window.get());
+
+  if (m_framebuffer_size.x <= 0 || m_framebuffer_size.y <= 0) { return false; }
+
+  auto& render_sync = m_render_sync.at(m_frame_index);
+  static constexpr auto fence_timeout_v = 
+    static_cast<std::uint64_t>(std::chrono::nanoseconds{std::chrono::seconds{3}}.count());
+  auto result =
+    m_device->waitForFences(*render_sync.drawn, vk::True, fence_timeout_v);
+  if (result != vk::Result::eSuccess) {
+    throw std::runtime_error{"Failed to wait for render fence"};
+  }
+
+  m_render_target = m_swapchain->acquire_next_image(*render_sync.draw);
+  if( !m_render_target ) {
+    m_swapchain->recreate(m_framebuffer_size);
+    return false;
+  }
+
+  m_device->resetFences(*render_sync.drawn);
+  m_imgui->new_frame();
+
+  return true;
+}
+
+auto App::begin_frame() -> vk::CommandBuffer {
+  auto const& render_sync = m_render_sync.at(m_frame_index);
+
+  auto command_buffer_bi = vk::CommandBufferBeginInfo{};
+  // Only use recorded commands once
+  command_buffer_bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
+  render_sync.command_buffer.begin(command_buffer_bi);
+  return render_sync.command_buffer;
+}
+
+void App::transition_for_render(vk::CommandBuffer const command_buffer) const {
+  auto dependency_info = vk::DependencyInfo{};
+  auto barrier = m_swapchain->base_barrier();
+
+  barrier.setOldLayout(vk::ImageLayout::eUndefined)
+    .setNewLayout(vk::ImageLayout::eAttachmentOptimal)
+    .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite)
+    .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+    .setDstAccessMask(barrier.srcAccessMask)
+    .setDstStageMask(barrier.srcStageMask);
+  dependency_info.setImageMemoryBarriers(barrier);
+  command_buffer.pipelineBarrier2(dependency_info);
+}
+
+void App::render(vk::CommandBuffer const command_buffer) {
+  auto color_attachment = vk::RenderingAttachmentInfo{};
+  color_attachment.setImageView(m_render_target->image_view)
+    .setImageLayout(vk::ImageLayout::eAttachmentOptimal)
+    .setLoadOp(vk::AttachmentLoadOp::eClear)
+    .setStoreOp(vk::AttachmentStoreOp::eStore)
+    // Temporaly red
+    .setClearValue(vk::ClearColorValue{1.0f, 0.0f, 0.0f, 1.0f});
+  auto rendering_info = vk::RenderingInfo{};
+  auto const render_area =
+    vk::Rect2D{vk::Offset2D{}, m_render_target->extent};
+  rendering_info.setRenderArea(render_area)
+    .setColorAttachments(color_attachment)
+    .setLayerCount(1);
+
+
+  command_buffer.beginRendering(rendering_info);
+  // here is where you draw stuff
+  
+  ImGui::ShowDemoWindow();
+
+  // ----------------------------
+  command_buffer.endRendering();
+
+  m_imgui->end_frame();
+  color_attachment.setLoadOp(vk::AttachmentLoadOp::eLoad);
+  rendering_info.setColorAttachments(color_attachment)
+    .setPDepthAttachment(nullptr);
+  command_buffer.beginRendering(rendering_info);
+  m_imgui->render(command_buffer);
+  command_buffer.endRendering();
+}
+
+void App::transition_for_present(vk::CommandBuffer const command_buffer) const {
+  auto dependency_info = vk::DependencyInfo{};
+  auto barrier = m_swapchain -> base_barrier();
+
+  barrier.setOldLayout(vk::ImageLayout::eAttachmentOptimal)
+    .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
+    .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite)
+    .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+    .setDstAccessMask(barrier.srcAccessMask)
+    .setDstStageMask(barrier.srcStageMask);
+  dependency_info.setImageMemoryBarriers(barrier);
+  command_buffer.pipelineBarrier2(dependency_info);
+}
+
+void App::submit_and_present() {
+  auto const& render_sync = m_render_sync.at(m_frame_index);
+  render_sync.command_buffer.end();
+
+  auto submit_info = vk::SubmitInfo2{};
+  auto const command_buffer_info = 
+    vk::CommandBufferSubmitInfo{render_sync.command_buffer};
+  auto wait_semaphore_info = vk::SemaphoreSubmitInfo{};
+  wait_semaphore_info.setSemaphore(*render_sync.draw)
+    .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+
+  auto signal_semaphore_info = vk::SemaphoreSubmitInfo{};
+  signal_semaphore_info.setSemaphore(m_swapchain->get_present_semaphore())
+    .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+
+  submit_info.setCommandBufferInfos(command_buffer_info)
+    .setWaitSemaphoreInfos(wait_semaphore_info)
+    .setSignalSemaphoreInfos(signal_semaphore_info);
+  m_queue.submit2(submit_info, *render_sync.drawn);
+
+  m_frame_index = (m_frame_index + 1) % m_render_sync.size();
+  m_render_target.reset();
+
+  auto const fb_size_changed = m_framebuffer_size != m_swapchain->get_size();
+  auto const out_of_date = !m_swapchain->present(m_queue);
+  if (fb_size_changed || out_of_date) {
+    m_swapchain->recreate(m_framebuffer_size);
+  }
+}
+
+void App::create_imgui() {
+  auto const imgui_ci = DearImGui::CreateInfo{
+    .window           = m_window.get(),
+    .api_version      = vk_version_v,
+    .instance         = *m_instance,
+    .physical_device  = m_gpu.device,
+    .queue_family     = m_gpu.queue_family,
+    .device           = *m_device,
+    .queue            = m_queue,
+    .color_format     = m_swapchain->get_format(),
+    .samples          = vk::SampleCountFlagBits::e1,
+  };
+  m_imgui.emplace(imgui_ci);
+}
+
 void App::main_loop() {
   while (glfwWindowShouldClose(m_window.get()) == GLFW_FALSE) {
     glfwPollEvents();
+    if(!acquire_render_target()) { continue; }
+    auto const command_buffer = begin_frame();
+    transition_for_render(command_buffer);
+    render(command_buffer);
+    transition_for_present(command_buffer);
+    submit_and_present();
   }
 }
 

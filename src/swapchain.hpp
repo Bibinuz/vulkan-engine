@@ -13,9 +13,8 @@ namespace lvk {
       explicit Swapchain(vk::Device device, Gpu const& gpu, vk::SurfaceKHR surface, glm::ivec2 size);
       auto recreate(glm::ivec2 size) -> bool;
 
-      [[nodiscard]] auto get_size() const -> glm::ivec2 {
-        return {m_ci.imageExtent.width, m_ci.imageExtent.height};
-      }
+      [[nodiscard]] inline auto get_size() const -> glm::ivec2 { return {m_ci.imageExtent.width, m_ci.imageExtent.height}; }
+      [[nodiscard]] inline auto get_format() const -> vk::Format { return m_ci.imageFormat; }
 
       [[nodiscard]] auto get_present_semaphore() const -> vk::Semaphore;
       [[nodiscard]] auto acquire_next_image(vk::Semaphore const to_signal) -> std::optional<RenderTarget>;
