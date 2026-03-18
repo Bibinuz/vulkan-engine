@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "shaderprogram.hpp"
 #include "vulkan/vulkan.hpp"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/vulkan_enums.hpp"
@@ -6,8 +7,13 @@
 #include "vulkan/vulkan_structs.hpp"
 #include "window.hpp"
 #include <GLFW/glfw3.h>
+#include <algorithm>
+#include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <print>
+#include <fstream>
+#include <stdexcept>
 #include <string_view>
 #include <vulkan/vulkan_hpp_macros.hpp>
 #include "gpu.hpp"
@@ -20,7 +26,61 @@ VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
 
 namespace lvk {
 
+namespace fs = std::filesystem;
+
+auto locate_assets_dir() -> fs::path {
+  static constexpr std::string_view dir_name_v{"assets"};
+  for (auto path = fs::current_path();
+      !path.empty() && path.has_parent_path(); path = path.parent_path()) {
+    auto ret = path / dir_name_v;
+    if (fs::is_directory(ret)) { return ret; }
+  }
+  std::println("[lvk] Warning: could not locate '{}'' directory", dir_name_v);
+  return fs::current_path();
+}
+
+[[nodiscard]] auto get_layers(std::span<char const* const> desired) -> std::vector<char const*> {
+  auto ret = std::vector<char const*>{};
+  ret.reserve(desired.size());
+  auto const avaiable = vk::enumerateInstanceLayerProperties();
+  for (char const* layer : desired) {
+    auto const pred = [layer = std::string_view{layer}]
+    (vk::LayerProperties const& propierties)
+    {return propierties.layerName == layer; };
+
+    if (std::ranges::find_if(avaiable, pred) == avaiable.end()) {
+      std::println("[lvk] [WARNING] Vulkan Layer '{}' not found", layer);
+      continue;
+    }
+    ret.push_back(layer);
+  }
+  return ret;
+}
+
+[[nodiscard]] auto to_spir_v(fs::path const& path) -> std::vector<std::uint32_t> {
+  auto file = std::ifstream{path, std::ios::binary | std::ios::ate};
+  if (!file.is_open()) {
+    throw std::runtime_error{
+      std::format("Failed to open file: '{}'", path.generic_string())};
+  }
+
+  auto const size = file.tellg();
+  auto const usize = static_cast<std::uint64_t>(size);
+  if(usize % sizeof(std::uint32_t) != 0) {
+    throw std::runtime_error{std::format("Invalid SPIR-V size: '{}'", usize)};
+  }
+  file.seekg({}, std::ios::beg);
+  auto ret = std::vector<std::uint32_t>{};
+  ret.resize(usize / sizeof(std::uint32_t));
+  void* data = ret.data();
+  file.read(static_cast<char*>(data), size);
+  return ret;
+}
+
 void App::run() {
+
+  m_assets_dir = locate_assets_dir();
+
   create_window();
   create_instance();
   create_surface();
@@ -29,6 +89,7 @@ void App::run() {
   create_swapchain();
   create_render_sync();
   create_imgui();
+  create_shader();
   main_loop();
 }
 
@@ -49,7 +110,14 @@ void App::create_instance() {
   auto instance_ci = vk::InstanceCreateInfo{};
   auto const extensions = glfw::instance_extensions();
   instance_ci.setPApplicationInfo(&app_info).setPEnabledExtensionNames(extensions);
-  
+ 
+  static constexpr auto layers_v = std::array{
+    "VK_LAYER_KHRONOS_shader_object",
+  };
+
+  auto const layers = get_layers(layers_v);
+  instance_ci.setPEnabledLayerNames(layers);
+
   m_instance = vk::createInstanceUnique(instance_ci);
   VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_instance);
 }
@@ -76,11 +144,18 @@ void App::create_device() {
 
   auto sync_feature = vk::PhysicalDeviceSynchronization2Features{vk::True};
   auto dynamic_rendering_feature = vk::PhysicalDeviceDynamicRenderingFeatures{vk::True};
-
+  auto shader_object_feature = 
+    vk::PhysicalDeviceShaderObjectFeaturesEXT{vk::True};
+  
+  dynamic_rendering_feature.setPNext(&shader_object_feature);
   sync_feature.setPNext(&dynamic_rendering_feature);
 
   auto device_ci = vk::DeviceCreateInfo{};
-  static constexpr auto extensions_v = std::array{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  static constexpr auto extensions_v = std::array{
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    "VK_EXT_shader_object",
+  };
+
   device_ci.setPEnabledExtensionNames(extensions_v)
     .setQueueCreateInfos(queue_ci)
     .setPEnabledFeatures(&enabled_featrues)
@@ -93,7 +168,10 @@ void App::create_device() {
   static constexpr std::uint32_t queue_index_v{0};
   m_queue = m_device->getQueue(m_gpu.queue_family, queue_index_v);
 
-  m_waiter = *m_device;   
+  m_waiter = *m_device;
+
+
+
 }
 
 void App::create_swapchain() {
@@ -173,6 +251,16 @@ void App::transition_for_render(vk::CommandBuffer const command_buffer) const {
   command_buffer.pipelineBarrier2(dependency_info);
 }
 
+void App::inspect() {
+  ImGui::ShowDemoWindow();
+  // TODO
+}
+
+void App::draw(vk::CommandBuffer const command_buffer) const {
+  m_shader->bind(command_buffer, m_framebuffer_size);
+  command_buffer.draw(3, 1, 0, 0);
+}
+
 void App::render(vk::CommandBuffer const command_buffer) {
   auto color_attachment = vk::RenderingAttachmentInfo{};
   color_attachment.setImageView(m_render_target->image_view)
@@ -192,7 +280,8 @@ void App::render(vk::CommandBuffer const command_buffer) {
   command_buffer.beginRendering(rendering_info);
   // here is where you draw stuff
   
-  ImGui::ShowDemoWindow();
+  inspect();
+  draw(command_buffer);
 
   // ----------------------------
   command_buffer.endRendering();
@@ -263,6 +352,23 @@ void App::create_imgui() {
     .samples          = vk::SampleCountFlagBits::e1,
   };
   m_imgui.emplace(imgui_ci);
+}
+
+void App::create_shader() {
+  auto const vert_spirv = to_spir_v(asset_path("shader.vert"));
+  auto const frag_spirv = to_spir_v(asset_path("shader.frag"));
+  auto const shader_ci = ShaderProgram::CreateInfo{
+    .device = *m_device,
+    .vert_spirv = vert_spirv,
+    .frag_spirv = frag_spirv,
+    .set_layouts = {},
+    .vertex_input = {},
+  };
+  m_shader.emplace(shader_ci);
+}
+
+auto App::asset_path(std::string_view const uri) const -> fs::path {
+  return m_assets_dir / uri;
 }
 
 void App::main_loop() {
