@@ -1,5 +1,7 @@
 #include "app.hpp"
 #include "shaderprogram.hpp"
+#include "vertex.hpp"
+#include "vma.hpp"
 #include "vulkan/vulkan.hpp"
 #include "vulkan/vulkan_core.h"
 #include "vulkan/vulkan_enums.hpp"
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <print>
 #include <fstream>
@@ -90,6 +93,8 @@ void App::run() {
   create_render_sync();
   create_imgui();
   create_shader();
+  create_allocator();
+  create_vertex_buffer();
   main_loop();
 }
 
@@ -253,12 +258,32 @@ void App::transition_for_render(vk::CommandBuffer const command_buffer) const {
 
 void App::inspect() {
   ImGui::ShowDemoWindow();
+
+  ImGui::SetNextWindowSize({200.0f, 100.0f}, ImGuiCond_Once);
+  if (ImGui::Begin("Inspect")) {
+    if (ImGui::Checkbox("wireframe", &m_wireframe)) {
+      m_shader->polygon_mode = m_wireframe ? vk::PolygonMode::eLine : vk::PolygonMode::eFill;
+    }
+    if (m_wireframe) {
+      auto const& line_width_range =
+        m_gpu.propierties.limits.lineWidthRange;
+      ImGui::SetNextItemWidth(100.0f);
+      ImGui::DragFloat("line width", &m_shader->line_width, 0.25f,
+          line_width_range[0], line_width_range[1]);
+    }
+  }
+  ImGui::End();
   // TODO
 }
 
 void App::draw(vk::CommandBuffer const command_buffer) const {
+  std::uint32_t const num_vert = [](vma::Buffer const& vbo){
+    std::uint32_t n = static_cast<std::uint32_t>(vbo.get().size)/static_cast<std::uint32_t>(sizeof(Vertex));
+    return n;
+  }(m_vbo);
   m_shader->bind(command_buffer, m_framebuffer_size);
-  command_buffer.draw(3, 1, 0, 0);
+  command_buffer.bindVertexBuffers(0, m_vbo.get().buffer, vk::DeviceSize{});
+  command_buffer.draw(num_vert, num_vert/3, 0, 0);
 }
 
 void App::render(vk::CommandBuffer const command_buffer) {
@@ -268,7 +293,7 @@ void App::render(vk::CommandBuffer const command_buffer) {
     .setLoadOp(vk::AttachmentLoadOp::eClear)
     .setStoreOp(vk::AttachmentStoreOp::eStore)
     // Temporaly red
-    .setClearValue(vk::ClearColorValue{1.0f, 0.0f, 0.0f, 1.0f});
+    .setClearValue(vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
   auto rendering_info = vk::RenderingInfo{};
   auto const render_area =
     vk::Rect2D{vk::Offset2D{}, m_render_target->extent};
@@ -354,17 +379,43 @@ void App::create_imgui() {
   m_imgui.emplace(imgui_ci);
 }
 
+void App::create_allocator() {
+  m_allocator = vma::create_allocator(*m_instance, m_gpu.device, *m_device);
+}
+
 void App::create_shader() {
   auto const vert_spirv = to_spir_v(asset_path("shader.vert"));
   auto const frag_spirv = to_spir_v(asset_path("shader.frag"));
+  static constexpr auto vertex_input_v = ShaderVertexInput{
+    .attributes = vertex_attributes_v,
+    .bindings = vertex_bindings_v,
+  };
   auto const shader_ci = ShaderProgram::CreateInfo{
     .device = *m_device,
     .vert_spirv = vert_spirv,
     .frag_spirv = frag_spirv,
     .set_layouts = {},
-    .vertex_input = {},
+    .vertex_input = {vertex_input_v},
   };
   m_shader.emplace(shader_ci);
+}
+
+void App::create_vertex_buffer() {
+  static constexpr auto vertices_v = std::array{
+    Vertex{.position = {-0.5f, -0.3f}, .color = {1.0f, 0.0f, 0.0f}},
+    Vertex{.position = {0.5f, -0.3f}, .color = {0.0f, 1.0f, 0.0f}},
+    Vertex{.position = {0.0f, 0.6f}, .color = {0.0f, 0.0f, 1.0f}},
+    Vertex{.position = {-0.5f, -0.3f}, .color = {1.0f, 0.0f, 0.0f}},
+    Vertex{.position = {0.5f, -0.3f}, .color = {0.0f, 1.0f, 0.0f}},
+    Vertex{.position = {0.0f, -0.8f}, .color = {0.0f, 0.0f, 1.0f}}, 
+  };
+  auto const buffer_ci = vma::BufferCreateInfo{
+    .allocator = m_allocator.get(),
+    .usage = vk::BufferUsageFlagBits::eVertexBuffer,
+    .queue_family = m_gpu.queue_family,
+  };
+  m_vbo = vma::create_buffer(buffer_ci, vma::BufferMemoryType::Host, sizeof(vertices_v));
+  std::memcpy(m_vbo.get().mapped, vertices_v.data(), sizeof(vertices_v));
 }
 
 auto App::asset_path(std::string_view const uri) const -> fs::path {

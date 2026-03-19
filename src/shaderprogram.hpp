@@ -25,7 +25,7 @@ class ShaderProgram {
   public:
     enum : std::uint8_t {
          None = 0,
-         AlphaBlend = 1<<0, //Turn on alpha blending
+         AlphaBlend = 1 << 0, //Turn on alpha blending
          DepthTest = 1 << 1, //Turn on depth write and test
     };
 

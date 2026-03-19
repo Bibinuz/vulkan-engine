@@ -1,5 +1,6 @@
 #pragma once
 #include "shaderprogram.hpp"
+#include "vma.hpp"
 #include "vulkan/vulkan_handles.hpp"
 #include "window.hpp"
 #include "gpu.hpp"
@@ -29,9 +30,11 @@ class App {
     void create_swapchain();
     void create_render_sync();
     void create_imgui();
+    void create_allocator();
     void create_shader();
+    void create_vertex_buffer();
 
-    auto acquire_render_target() -> bool;
+auto acquire_render_target() -> bool;
     auto begin_frame() -> vk::CommandBuffer;
     void transition_for_render(vk::CommandBuffer command_buffer) const;
     void render(vk::CommandBuffer command_buffer);
@@ -55,8 +58,13 @@ class App {
     glm::ivec2 m_framebuffer_size{};
     std::optional<RenderTarget> m_render_target{};
     std::optional<DearImGui> m_imgui{};
-    std::filesystem::path m_assets_dir{}; 
+    std::filesystem::path m_assets_dir{};
+    vma::Allocator m_allocator{}; // anywhere between device and shader.
     std::optional<ShaderProgram> m_shader{};
+    vma::Buffer m_vbo{};
+    //temp
+    bool m_wireframe{};
+
     //Last member, first to be deleted
     ScopedWaiter m_waiter{};
 };
