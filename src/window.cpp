@@ -1,5 +1,4 @@
 #include "window.hpp"
-#include "vulkan/vulkan_handles.hpp"
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <print>

@@ -1,4 +1,5 @@
 #pragma once
+#include "commandblock.hpp"
 #include "shaderprogram.hpp"
 #include "vma.hpp"
 #include "vulkan/vulkan_handles.hpp"
@@ -8,6 +9,8 @@
 #include "swapchain.hpp"
 #include "resource_buffering.hpp"
 #include "dearimgui.hpp"
+#include <bit>
+#include <cstddef>
 #include <filesystem>
 
 namespace lvk {
@@ -33,6 +36,8 @@ class App {
     void create_allocator();
     void create_shader();
     void create_vertex_buffer();
+    void create_cmd_block_pool();
+    auto create_command_block() const -> CommandBlock;
 
 auto acquire_render_target() -> bool;
     auto begin_frame() -> vk::CommandBuffer;
@@ -62,10 +67,17 @@ auto acquire_render_target() -> bool;
     vma::Allocator m_allocator{}; // anywhere between device and shader.
     std::optional<ShaderProgram> m_shader{};
     vma::Buffer m_vbo{};
+    vk::UniqueCommandPool m_cmd_block_pool{};
     //temp
     bool m_wireframe{};
 
     //Last member, first to be deleted
     ScopedWaiter m_waiter{};
 };
+
+template <typename T>
+[[nodiscard]] constexpr auto to_byte_array(T const& t) {
+  return std::bit_cast<std::array<std::byte, sizeof(T) >>(t);
+}
+
 }
