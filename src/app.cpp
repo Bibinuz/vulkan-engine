@@ -1,4 +1,6 @@
 #include "app.hpp"
+#include "glm/ext/matrix_clip_space.hpp"
+#include "gpu.hpp"
 #include "vertex.hpp"
 #include "vulkan/vulkan.hpp"
 #include "vulkan/vulkan_core.h"
@@ -7,390 +9,380 @@
 #include "window.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
-#include <algorithm>
+#include <array>
+#include <bit>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <print>
 #include <fstream>
+#include <imgui.h>
+#include <print>
+#include <ranges>
 #include <stdexcept>
 #include <string_view>
 #include <vulkan/vulkan_hpp_macros.hpp>
-#include "gpu.hpp"
-#include <ranges>
-#include <chrono>
-#include <imgui.h>
 
 VULKAN_HPP_DEFAULT_DISPATCH_LOADER_DYNAMIC_STORAGE
-
 
 namespace lvk {
 
 namespace fs = std::filesystem;
 
 auto locate_assets_dir() -> fs::path {
-  static constexpr std::string_view dir_name_v{"assets"};
-  for (auto path = fs::current_path();
-      !path.empty() && path.has_parent_path(); path = path.parent_path()) {
-    auto ret = path / dir_name_v;
-    if (fs::is_directory(ret)) { return ret; }
-  }
-  std::println("[lvk] Warning: could not locate '{}'' directory", dir_name_v);
-  return fs::current_path();
-}
-
-[[nodiscard]] auto get_layers(std::span<char const* const> desired) -> std::vector<char const*> {
-  auto ret = std::vector<char const*>{};
-  ret.reserve(desired.size());
-  auto const avaiable = vk::enumerateInstanceLayerProperties();
-  for (char const* layer : desired) {
-    auto const pred = [layer = std::string_view{layer}]
-    (vk::LayerProperties const& propierties)
-    {return propierties.layerName == layer; };
-
-    if (std::ranges::find_if(avaiable, pred) == avaiable.end()) {
-      std::println("[lvk] [WARNING] Vulkan Layer '{}' not found", layer);
-      continue;
+    static constexpr std::string_view dir_name_v{"assets"};
+    for (auto path = fs::current_path(); !path.empty() && path.has_parent_path();
+         path = path.parent_path()) {
+        auto ret = path / dir_name_v;
+        if (fs::is_directory(ret)) {
+            return ret;
+        }
     }
-    ret.push_back(layer);
-  }
-  return ret;
+    std::println("[lvk] Warning: could not locate '{}'' directory", dir_name_v);
+    return fs::current_path();
 }
 
-[[nodiscard]] auto to_spir_v(fs::path const& path) -> std::vector<std::uint32_t> {
-  auto file = std::ifstream{path, std::ios::binary | std::ios::ate};
-  if (!file.is_open()) {
-    throw std::runtime_error{
-      std::format("Failed to open file: '{}'", path.generic_string())};
-  }
-
-  auto const size = file.tellg();
-  auto const usize = static_cast<std::uint64_t>(size);
-  if(usize % sizeof(std::uint32_t) != 0) {
-    throw std::runtime_error{std::format("Invalid SPIR-V size: '{}'", usize)};
-  }
-  file.seekg({}, std::ios::beg);
-  auto ret = std::vector<std::uint32_t>{};
-  ret.resize(usize / sizeof(std::uint32_t));
-  void* data = ret.data();
-  file.read(static_cast<char*>(data), size);
-  return ret;
+[[nodiscard]] auto get_layers(std::span<char const *const> desired) -> std::vector<char const *> {
+    auto ret = std::vector<char const *>{};
+    ret.reserve(desired.size());
+    auto const avaiable = vk::enumerateInstanceLayerProperties();
+    for (char const *layer : desired) {
+        auto const pred = [layer =
+                               std::string_view{layer}](vk::LayerProperties const &propierties) {
+            return propierties.layerName == layer;
+        };
+        if (std::ranges::find_if(avaiable, pred) == avaiable.end()) {
+            std::println("[lvk] [WARNING] Vulkan Layer '{}' not found", layer);
+            continue;
+        }
+        ret.push_back(layer);
+    }
+    return ret;
 }
+
+[[nodiscard]] auto to_spir_v(fs::path const &path) -> std::vector<std::uint32_t> {
+    auto file = std::ifstream{path, std::ios::binary | std::ios::ate};
+    if (!file.is_open()) {
+        throw std::runtime_error{std::format("Failed to open file: '{}'", path.generic_string())};
+    }
+    auto const size = file.tellg();
+    auto const usize = static_cast<std::uint64_t>(size);
+    if (usize % sizeof(std::uint32_t) != 0) {
+        throw std::runtime_error{std::format("Invalid SPIR-V size: '{}'", usize)};
+    }
+    file.seekg({}, std::ios::beg);
+    auto ret = std::vector<std::uint32_t>{};
+    ret.resize(usize / sizeof(std::uint32_t));
+    void *data = ret.data();
+    file.read(static_cast<char *>(data), size);
+    return ret;
+}
+
+constexpr auto layout_binding(std::uint32_t binding, vk::DescriptorType const type) {
+    return vk::DescriptorSetLayoutBinding{binding, type, 1, vk::ShaderStageFlagBits::eAllGraphics};
+};
 
 void App::run() {
-
-  m_assets_dir = locate_assets_dir();
-
-  create_window();
-  create_instance();
-  create_surface();
-  select_gpu();  
-  create_device();
-  create_swapchain();
-  create_render_sync();
-  create_imgui();
-  create_shader();
-  create_allocator();
-  create_cmd_block_pool();
-  create_vertex_buffer();
-  main_loop();
+    m_assets_dir = locate_assets_dir();
+    create_window();
+    create_instance();
+    create_surface();
+    select_gpu();
+    create_device();
+    create_swapchain();
+    create_allocator();
+    create_render_sync();
+    create_imgui();
+    create_descriptor_pool();
+    create_pipeline_layout();
+    create_shader();
+    create_cmd_block_pool();
+    create_shader_resources();
+    create_descriptor_sets();
+    main_loop();
 }
 
-void App::create_window() {
-  m_window = glfw::create_window({1920, 1080}, "VulkanEngine");
-}
+void App::create_window() { m_window = glfw::create_window({1920, 1080}, "VulkanEngine"); }
 
 void App::create_instance() {
-  VULKAN_HPP_DEFAULT_DISPATCHER.init();
-  auto const loader_version = vk::enumerateInstanceVersion();
-  if (loader_version < vk_version_v) {
-    throw std::runtime_error{"Loader does not support vulkan 1.3"};
-  }
-  
-  auto app_info = vk::ApplicationInfo{};
-  app_info.setPApplicationName("Learn Vulkan").setApiVersion(vk_version_v);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init();
+    auto const loader_version = vk::enumerateInstanceVersion();
+    if (loader_version < vk_version_v) {
+        throw std::runtime_error{"Loader does not support vulkan 1.3"};
+    }
 
-  auto instance_ci = vk::InstanceCreateInfo{};
-  auto const extensions = glfw::instance_extensions();
-  instance_ci.setPApplicationInfo(&app_info).setPEnabledExtensionNames(extensions);
- 
-  static constexpr auto layers_v = std::array{
-    "VK_LAYER_KHRONOS_shader_object",
-  };
+    auto app_info = vk::ApplicationInfo{};
+    app_info.setPApplicationName("Learn Vulkan").setApiVersion(vk_version_v);
+    auto instance_ci = vk::InstanceCreateInfo{};
+    auto const extensions = glfw::instance_extensions();
+    instance_ci.setPApplicationInfo(&app_info).setPEnabledExtensionNames(extensions);
 
-  auto const layers = get_layers(layers_v);
-  instance_ci.setPEnabledLayerNames(layers);
-
-  m_instance = vk::createInstanceUnique(instance_ci);
-  VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_instance);
+    static constexpr auto layers_v = std::array{
+        "VK_LAYER_KHRONOS_shader_object",
+    };
+    auto const layers = get_layers(layers_v);
+    instance_ci.setPEnabledLayerNames(layers);
+    m_instance = vk::createInstanceUnique(instance_ci);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_instance);
 }
 
-void App::create_surface() {
-  m_surface = glfw::create_surface(m_window.get(), *m_instance);
-}
+void App::create_surface() { m_surface = glfw::create_surface(m_window.get(), *m_instance); }
 
 void App::select_gpu() {
-  m_gpu = get_suitable_gpu(*m_instance, *m_surface);
-  std::println("Using GPU: {}", std::string_view{m_gpu.propierties.deviceName});
+    m_gpu = get_suitable_gpu(*m_instance, *m_surface);
+    std::println("Using GPU: {}", std::string_view{m_gpu.propierties.deviceName});
 }
 
 void App::create_device() {
-  auto queue_ci = vk::DeviceQueueCreateInfo{};
-  static constexpr auto queue_priorities_v = std::array{1.0f};
-  queue_ci.setQueueFamilyIndex(m_gpu.queue_family).setQueueCount(1).setQueuePriorities(queue_priorities_v);
+    auto queue_ci = vk::DeviceQueueCreateInfo{};
+    static constexpr auto queue_priorities_v = std::array{1.0f};
+    queue_ci.setQueueFamilyIndex(m_gpu.queue_family)
+        .setQueueCount(1)
+        .setQueuePriorities(queue_priorities_v);
+    auto enabled_featrues = vk::PhysicalDeviceFeatures{};
+    enabled_featrues.fillModeNonSolid = m_gpu.features.fillModeNonSolid;
+    enabled_featrues.wideLines = m_gpu.features.wideLines;
+    enabled_featrues.samplerAnisotropy = m_gpu.features.samplerAnisotropy;
+    enabled_featrues.sampleRateShading = m_gpu.features.sampleRateShading;
+    auto sync_feature = vk::PhysicalDeviceSynchronization2Features{vk::True};
+    auto dynamic_rendering_feature = vk::PhysicalDeviceDynamicRenderingFeatures{vk::True};
+    auto shader_object_feature = vk::PhysicalDeviceShaderObjectFeaturesEXT{vk::True};
 
-  auto enabled_featrues = vk::PhysicalDeviceFeatures{};
-  enabled_featrues.fillModeNonSolid = m_gpu.features.fillModeNonSolid;
-  enabled_featrues.wideLines = m_gpu.features.wideLines;
-  enabled_featrues.samplerAnisotropy = m_gpu.features.samplerAnisotropy;
-  enabled_featrues.sampleRateShading = m_gpu.features.sampleRateShading;
+    dynamic_rendering_feature.setPNext(&shader_object_feature);
+    sync_feature.setPNext(&dynamic_rendering_feature);
+    auto device_ci = vk::DeviceCreateInfo{};
+    static constexpr auto extensions_v = std::array{
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        "VK_EXT_shader_object",
+    };
+    device_ci.setPEnabledExtensionNames(extensions_v)
+        .setQueueCreateInfos(queue_ci)
+        .setPEnabledFeatures(&enabled_featrues)
+        .setPNext(&sync_feature);
 
-  auto sync_feature = vk::PhysicalDeviceSynchronization2Features{vk::True};
-  auto dynamic_rendering_feature = vk::PhysicalDeviceDynamicRenderingFeatures{vk::True};
-  auto shader_object_feature = 
-    vk::PhysicalDeviceShaderObjectFeaturesEXT{vk::True};
-  
-  dynamic_rendering_feature.setPNext(&shader_object_feature);
-  sync_feature.setPNext(&dynamic_rendering_feature);
-
-  auto device_ci = vk::DeviceCreateInfo{};
-  static constexpr auto extensions_v = std::array{
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    "VK_EXT_shader_object",
-  };
-
-  device_ci.setPEnabledExtensionNames(extensions_v)
-    .setQueueCreateInfos(queue_ci)
-    .setPEnabledFeatures(&enabled_featrues)
-    .setPNext(&sync_feature);
-    
-  m_device = m_gpu.device.createDeviceUnique(device_ci);
-
-  VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_device);
-  
-  static constexpr std::uint32_t queue_index_v{0};
-  m_queue = m_device->getQueue(m_gpu.queue_family, queue_index_v);
-
-  m_waiter = *m_device;
-
-
-
+    m_device = m_gpu.device.createDeviceUnique(device_ci);
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(*m_device);
+    static constexpr std::uint32_t queue_index_v{0};
+    m_queue = m_device->getQueue(m_gpu.queue_family, queue_index_v);
+    m_waiter = *m_device;
 }
 
 void App::create_swapchain() {
-  auto const size = glfw::framebuffer_size(m_window.get());
-  m_swapchain.emplace(*m_device, m_gpu, *m_surface, size);
+    auto const size = glfw::framebuffer_size(m_window.get());
+    m_swapchain.emplace(*m_device, m_gpu, *m_surface, size);
 }
 
 void App::create_render_sync() {
-  auto command_pool_ci = vk::CommandPoolCreateInfo{};
-  command_pool_ci.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
-    .setQueueFamilyIndex(m_gpu.queue_family);
-  m_render_cmd_pool = m_device->createCommandPoolUnique(command_pool_ci);
-
-  auto command_buffer_ai = vk::CommandBufferAllocateInfo{};
-  command_buffer_ai.setCommandPool(*m_render_cmd_pool)
-    .setCommandBufferCount(static_cast<std::uint32_t>(resource_buffering_v))
-    .setLevel(vk::CommandBufferLevel::ePrimary);
-  auto const command_buffers = 
-    m_device->allocateCommandBuffers(command_buffer_ai);
-  assert(command_buffers.size() == m_render_sync.size());
-
-  static constexpr auto fence_create_info_v = vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled};
-  for (auto [sync, command_buffer] : std::views::zip(m_render_sync, command_buffers)) {
-    sync.command_buffer = command_buffer;
-    sync.draw = m_device->createSemaphoreUnique({});
-    sync.drawn = m_device->createFenceUnique(fence_create_info_v);
-  }
+    auto command_pool_ci = vk::CommandPoolCreateInfo{};
+    command_pool_ci.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
+        .setQueueFamilyIndex(m_gpu.queue_family);
+    m_render_cmd_pool = m_device->createCommandPoolUnique(command_pool_ci);
+    auto command_buffer_ai = vk::CommandBufferAllocateInfo{};
+    command_buffer_ai.setCommandPool(*m_render_cmd_pool)
+        .setCommandBufferCount(static_cast<std::uint32_t>(resource_buffering_v))
+        .setLevel(vk::CommandBufferLevel::ePrimary);
+    auto const command_buffers = m_device->allocateCommandBuffers(command_buffer_ai);
+    assert(command_buffers.size() == m_render_sync.size());
+    static constexpr auto fence_create_info_v =
+        vk::FenceCreateInfo{vk::FenceCreateFlagBits::eSignaled};
+    for (auto [sync, command_buffer] : std::views::zip(m_render_sync, command_buffers)) {
+        sync.command_buffer = command_buffer;
+        sync.draw = m_device->createSemaphoreUnique({});
+        sync.drawn = m_device->createFenceUnique(fence_create_info_v);
+    }
 }
 
 auto App::acquire_render_target() -> bool {
-  m_framebuffer_size = glfw::framebuffer_size(m_window.get());
-
-  if (m_framebuffer_size.x <= 0 || m_framebuffer_size.y <= 0) { return false; }
-
-  auto& render_sync = m_render_sync.at(m_frame_index);
-  static constexpr auto fence_timeout_v = 
-    static_cast<std::uint64_t>(std::chrono::nanoseconds{std::chrono::seconds{3}}.count());
-  auto result =
-    m_device->waitForFences(*render_sync.drawn, vk::True, fence_timeout_v);
-  if (result != vk::Result::eSuccess) {
-    throw std::runtime_error{"Failed to wait for render fence"};
-  }
-
-  m_render_target = m_swapchain->acquire_next_image(*render_sync.draw);
-  if( !m_render_target ) {
-    m_swapchain->recreate(m_framebuffer_size);
-    return false;
-  }
-
-  m_device->resetFences(*render_sync.drawn);
-  m_imgui->new_frame();
-
-  return true;
+    m_framebuffer_size = glfw::framebuffer_size(m_window.get());
+    if (m_framebuffer_size.x <= 0 || m_framebuffer_size.y <= 0) {
+        return false;
+    }
+    auto &render_sync = m_render_sync.at(m_frame_index);
+    static constexpr auto fence_timeout_v =
+        static_cast<std::uint64_t>(std::chrono::nanoseconds{std::chrono::seconds{3}}.count());
+    auto result = m_device->waitForFences(*render_sync.drawn, vk::True, fence_timeout_v);
+    if (result != vk::Result::eSuccess) {
+        throw std::runtime_error{"Failed to wait for render fence"};
+    }
+    m_render_target = m_swapchain->acquire_next_image(*render_sync.draw);
+    if (!m_render_target) {
+        m_swapchain->recreate(m_framebuffer_size);
+        return false;
+    }
+    m_device->resetFences(*render_sync.drawn);
+    m_imgui->new_frame();
+    return true;
 }
 
 auto App::begin_frame() -> vk::CommandBuffer {
-  auto const& render_sync = m_render_sync.at(m_frame_index);
-
-  auto command_buffer_bi = vk::CommandBufferBeginInfo{};
-  // Only use recorded commands once
-  command_buffer_bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
-  render_sync.command_buffer.begin(command_buffer_bi);
-  return render_sync.command_buffer;
+    auto const &render_sync = m_render_sync.at(m_frame_index);
+    auto command_buffer_bi = vk::CommandBufferBeginInfo{};
+    // Only use recorded commands once
+    command_buffer_bi.setFlags(vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
+    render_sync.command_buffer.begin(command_buffer_bi);
+    return render_sync.command_buffer;
 }
 
 void App::transition_for_render(vk::CommandBuffer const command_buffer) const {
-  auto dependency_info = vk::DependencyInfo{};
-  auto barrier = m_swapchain->base_barrier();
-
-  barrier.setOldLayout(vk::ImageLayout::eUndefined)
-    .setNewLayout(vk::ImageLayout::eAttachmentOptimal)
-    .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite)
-    .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-    .setDstAccessMask(barrier.srcAccessMask)
-    .setDstStageMask(barrier.srcStageMask);
-  dependency_info.setImageMemoryBarriers(barrier);
-  command_buffer.pipelineBarrier2(dependency_info);
+    auto dependency_info = vk::DependencyInfo{};
+    auto barrier = m_swapchain->base_barrier();
+    barrier.setOldLayout(vk::ImageLayout::eUndefined)
+        .setNewLayout(vk::ImageLayout::eAttachmentOptimal)
+        .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead |
+                          vk::AccessFlagBits2::eColorAttachmentWrite)
+        .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+        .setDstAccessMask(barrier.srcAccessMask)
+        .setDstStageMask(barrier.srcStageMask);
+    dependency_info.setImageMemoryBarriers(barrier);
+    command_buffer.pipelineBarrier2(dependency_info);
 }
 
 void App::inspect() {
-  ImGui::ShowDemoWindow();
-
-  ImGui::SetNextWindowSize({200.0f, 100.0f}, ImGuiCond_Once);
-  if (ImGui::Begin("Inspect")) {
-    if (ImGui::Checkbox("wireframe", &m_wireframe)) {
-      m_shader->polygon_mode = m_wireframe ? vk::PolygonMode::eLine : vk::PolygonMode::eFill;
+    ImGui::SetNextWindowSize({200.0f, 100.0f}, ImGuiCond_Once);
+    if (ImGui::Begin("Inspect")) {
+        if (ImGui::Checkbox("wireframe", &m_wireframe)) {
+            m_shader->polygon_mode = m_wireframe ? vk::PolygonMode::eLine : vk::PolygonMode::eFill;
+        }
+        if (m_wireframe) {
+            auto const &line_width_range = m_gpu.propierties.limits.lineWidthRange;
+            ImGui::SetNextItemWidth(100.0f);
+            ImGui::DragFloat("line width", &m_shader->line_width, 0.25f, line_width_range[0],
+                             line_width_range[1]);
+        }
+        static auto const inspect_transform = [](Transform &out) {
+            ImGui::DragFloat2("position", &out.position.x);
+            ImGui::DragFloat("roation", &out.rotation);
+            ImGui::DragFloat2("scale", &out.scale.x, 0.1f);
+        };
+        ImGui::Separator();
+        if (ImGui::TreeNode("View")) {
+            inspect_transform(m_view_transform);
+            ImGui::TreePop();
+        }
+        ImGui::Separator();
+        if (ImGui::TreeNode("Instances")) {
+            for (std::size_t i = 0; i < m_instances.size(); ++i) {
+                auto const label = std::to_string(i);
+                if (ImGui::TreeNode(label.c_str())) {
+                    inspect_transform(m_instances.at(i));
+                    ImGui::TreePop();
+                }
+            }
+            ImGui::TreePop();
+        }
     }
-    if (m_wireframe) {
-      auto const& line_width_range =
-        m_gpu.propierties.limits.lineWidthRange;
-      ImGui::SetNextItemWidth(100.0f);
-      ImGui::DragFloat("line width", &m_shader->line_width, 0.25f,
-          line_width_range[0], line_width_range[1]);
-    }
-  }
-  ImGui::End();
-  // TODO
+    ImGui::End();
 }
 
 void App::draw(vk::CommandBuffer const command_buffer) const {
-  m_shader->bind(command_buffer, m_framebuffer_size);
-  command_buffer.bindVertexBuffers(0, m_vbo.get().buffer, vk::DeviceSize{});
-  command_buffer.bindIndexBuffer(m_vbo.get().buffer, 4*sizeof(Vertex), vk::IndexType::eUint32);
-  command_buffer.drawIndexed(6, 2, 0, 0, 0);
+    m_shader->bind(command_buffer, m_framebuffer_size);
+    bind_descriptor_sets(command_buffer);
+    command_buffer.bindVertexBuffers(0, m_vbo.get().buffer, vk::DeviceSize{});
+    command_buffer.bindIndexBuffer(m_vbo.get().buffer, 4 * sizeof(Vertex), vk::IndexType::eUint32);
+    auto const instances = static_cast<std::uint32_t>(m_instances.size());
+    command_buffer.drawIndexed(6, instances, 0, 0, 0);
 }
 
 void App::render(vk::CommandBuffer const command_buffer) {
-  auto color_attachment = vk::RenderingAttachmentInfo{};
-  color_attachment.setImageView(m_render_target->image_view)
-    .setImageLayout(vk::ImageLayout::eAttachmentOptimal)
-    .setLoadOp(vk::AttachmentLoadOp::eClear)
-    .setStoreOp(vk::AttachmentStoreOp::eStore)
-    // Temporaly red
-    .setClearValue(vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
-  auto rendering_info = vk::RenderingInfo{};
-  auto const render_area =
-    vk::Rect2D{vk::Offset2D{}, m_render_target->extent};
-  rendering_info.setRenderArea(render_area)
-    .setColorAttachments(color_attachment)
-    .setLayerCount(1);
-
-
-  command_buffer.beginRendering(rendering_info);
-  // here is where you draw stuff
-  
-  inspect();
-  draw(command_buffer);
-
-  // ----------------------------
-  command_buffer.endRendering();
-
-  m_imgui->end_frame();
-  color_attachment.setLoadOp(vk::AttachmentLoadOp::eLoad);
-  rendering_info.setColorAttachments(color_attachment)
-    .setPDepthAttachment(nullptr);
-  command_buffer.beginRendering(rendering_info);
-  m_imgui->render(command_buffer);
-  command_buffer.endRendering();
+    auto color_attachment = vk::RenderingAttachmentInfo{};
+    color_attachment.setImageView(m_render_target->image_view)
+        .setImageLayout(vk::ImageLayout::eAttachmentOptimal)
+        .setLoadOp(vk::AttachmentLoadOp::eClear)
+        .setStoreOp(vk::AttachmentStoreOp::eStore)
+        // Temporaly red
+        .setClearValue(vk::ClearColorValue{0.0f, 0.0f, 0.0f, 1.0f});
+    auto rendering_info = vk::RenderingInfo{};
+    auto const render_area = vk::Rect2D{vk::Offset2D{}, m_render_target->extent};
+    rendering_info.setRenderArea(render_area)
+        .setColorAttachments(color_attachment)
+        .setLayerCount(1);
+    command_buffer.beginRendering(rendering_info);
+    // here is where you draw stuff
+    inspect();
+    update_view();
+    update_instances();
+    draw(command_buffer);
+    // ----------------------------
+    command_buffer.endRendering();
+    m_imgui->end_frame();
+    color_attachment.setLoadOp(vk::AttachmentLoadOp::eLoad);
+    rendering_info.setColorAttachments(color_attachment).setPDepthAttachment(nullptr);
+    command_buffer.beginRendering(rendering_info);
+    m_imgui->render(command_buffer);
+    command_buffer.endRendering();
 }
 
 void App::transition_for_present(vk::CommandBuffer const command_buffer) const {
-  auto dependency_info = vk::DependencyInfo{};
-  auto barrier = m_swapchain -> base_barrier();
-
-  barrier.setOldLayout(vk::ImageLayout::eAttachmentOptimal)
-    .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
-    .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite)
-    .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
-    .setDstAccessMask(barrier.srcAccessMask)
-    .setDstStageMask(barrier.srcStageMask);
-  dependency_info.setImageMemoryBarriers(barrier);
-  command_buffer.pipelineBarrier2(dependency_info);
+    auto dependency_info = vk::DependencyInfo{};
+    auto barrier = m_swapchain->base_barrier();
+    barrier.setOldLayout(vk::ImageLayout::eAttachmentOptimal)
+        .setNewLayout(vk::ImageLayout::ePresentSrcKHR)
+        .setSrcAccessMask(vk::AccessFlagBits2::eColorAttachmentRead |
+                          vk::AccessFlagBits2::eColorAttachmentWrite)
+        .setSrcStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput)
+        .setDstAccessMask(barrier.srcAccessMask)
+        .setDstStageMask(barrier.srcStageMask);
+    dependency_info.setImageMemoryBarriers(barrier);
+    command_buffer.pipelineBarrier2(dependency_info);
 }
 
 void App::submit_and_present() {
-  auto const& render_sync = m_render_sync.at(m_frame_index);
-  render_sync.command_buffer.end();
-
-  auto submit_info = vk::SubmitInfo2{};
-  auto const command_buffer_info = 
-    vk::CommandBufferSubmitInfo{render_sync.command_buffer};
-  auto wait_semaphore_info = vk::SemaphoreSubmitInfo{};
-  wait_semaphore_info.setSemaphore(*render_sync.draw)
-    .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
-
-  auto signal_semaphore_info = vk::SemaphoreSubmitInfo{};
-  signal_semaphore_info.setSemaphore(m_swapchain->get_present_semaphore())
-    .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
-
-  submit_info.setCommandBufferInfos(command_buffer_info)
-    .setWaitSemaphoreInfos(wait_semaphore_info)
-    .setSignalSemaphoreInfos(signal_semaphore_info);
-  m_queue.submit2(submit_info, *render_sync.drawn);
-
-  m_frame_index = (m_frame_index + 1) % m_render_sync.size();
-  m_render_target.reset();
-
-  auto const fb_size_changed = m_framebuffer_size != m_swapchain->get_size();
-  auto const out_of_date = !m_swapchain->present(m_queue);
-  if (fb_size_changed || out_of_date) {
-    m_swapchain->recreate(m_framebuffer_size);
-  }
+    auto const &render_sync = m_render_sync.at(m_frame_index);
+    render_sync.command_buffer.end();
+    auto submit_info = vk::SubmitInfo2{};
+    auto const command_buffer_info = vk::CommandBufferSubmitInfo{render_sync.command_buffer};
+    auto wait_semaphore_info = vk::SemaphoreSubmitInfo{};
+    wait_semaphore_info.setSemaphore(*render_sync.draw)
+        .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    auto signal_semaphore_info = vk::SemaphoreSubmitInfo{};
+    signal_semaphore_info.setSemaphore(m_swapchain->get_present_semaphore())
+        .setStageMask(vk::PipelineStageFlagBits2::eColorAttachmentOutput);
+    submit_info.setCommandBufferInfos(command_buffer_info)
+        .setWaitSemaphoreInfos(wait_semaphore_info)
+        .setSignalSemaphoreInfos(signal_semaphore_info);
+    m_queue.submit2(submit_info, *render_sync.drawn);
+    m_frame_index = (m_frame_index + 1) % m_render_sync.size();
+    m_render_target.reset();
+    auto const fb_size_changed = m_framebuffer_size != m_swapchain->get_size();
+    auto const out_of_date = !m_swapchain->present(m_queue);
+    if (fb_size_changed || out_of_date) {
+        m_swapchain->recreate(m_framebuffer_size);
+    }
 }
 
 void App::create_imgui() {
-  auto const imgui_ci = DearImGui::CreateInfo{
-    .window           = m_window.get(),
-    .api_version      = vk_version_v,
-    .instance         = *m_instance,
-    .physical_device  = m_gpu.device,
-    .queue_family     = m_gpu.queue_family,
-    .device           = *m_device,
-    .queue            = m_queue,
-    .color_format     = m_swapchain->get_format(),
-    .samples          = vk::SampleCountFlagBits::e1,
-  };
-  m_imgui.emplace(imgui_ci);
+    auto const imgui_ci = DearImGui::CreateInfo{
+        .window = m_window.get(),
+        .api_version = vk_version_v,
+        .instance = *m_instance,
+        .physical_device = m_gpu.device,
+        .queue_family = m_gpu.queue_family,
+        .device = *m_device,
+        .queue = m_queue,
+        .color_format = m_swapchain->get_format(),
+        .samples = vk::SampleCountFlagBits::e1,
+    };
+    m_imgui.emplace(imgui_ci);
 }
 
 void App::create_allocator() {
-  m_allocator = vma::create_allocator(*m_instance, m_gpu.device, *m_device);
+    m_allocator = vma::create_allocator(*m_instance, m_gpu.device, *m_device);
 }
 
 void App::create_shader() {
-  auto const vert_spirv = to_spir_v(asset_path("shader.vert"));
-  auto const frag_spirv = to_spir_v(asset_path("shader.frag"));
-  static constexpr auto vertex_input_v = ShaderVertexInput{
-    .attributes = vertex_attributes_v,
-    .bindings = vertex_bindings_v,
-  };
-  auto const shader_ci = ShaderProgram::CreateInfo{
-    .device = *m_device,
-    .vert_spirv = vert_spirv,
-    .frag_spirv = frag_spirv,
-    .set_layouts = {},
-    .vertex_input = {vertex_input_v},
-  };
-  m_shader.emplace(shader_ci);
+    auto const vert_spirv = to_spir_v(asset_path("shader.vert"));
+    auto const frag_spirv = to_spir_v(asset_path("shader.frag"));
+    static constexpr auto vertex_input_v = ShaderVertexInput{
+        .attributes = vertex_attributes_v,
+        .bindings = vertex_bindings_v,
+    };
+    auto const shader_ci = ShaderProgram::CreateInfo{
+        .device = *m_device,
+        .vert_spirv = vert_spirv,
+        .frag_spirv = frag_spirv,
+        .set_layouts = m_set_layout_views,
+        .vertex_input = {vertex_input_v},
+    };
+    m_shader.emplace(shader_ci);
 }
 
 /*
@@ -401,72 +393,197 @@ void App::create_vertex_buffer() {
     Vertex{.position = {0.0f, 0.6f}, .color = {0.0f, 0.0f, 1.0f}},
     Vertex{.position = {-0.5f, -0.3f}, .color = {1.0f, 0.0f, 0.0f}},
     Vertex{.position = {0.5f, -0.3f}, .color = {0.0f, 1.0f, 0.0f}},
-    Vertex{.position = {0.0f, -0.8f}, .color = {0.0f, 0.0f, 1.0f}}, 
+    Vertex{.position = {0.0f, -0.8f}, .color = {0.0f, 0.0f, 1.0f}},
   };
   auto const buffer_ci = vma::BufferCreateInfo{
     .allocator = m_allocator.get(),
     .usage = vk::BufferUsageFlagBits::eVertexBuffer,
     .queue_family = m_gpu.queue_family,
   };
-  m_vbo = vma::create_buffer(buffer_ci, vma::BufferMemoryType::Host, sizeof(vertices_v));
-  std::memcpy(m_vbo.get().mapped, vertices_v.data(), sizeof(vertices_v));
+  m_vbo = vma::create_buffer(buffer_ci, vma::BufferMemoryType::Host,
+sizeof(vertices_v)); std::memcpy(m_vbo.get().mapped, vertices_v.data(),
+sizeof(vertices_v));
 }
 */
 
-void App::create_vertex_buffer() {
-  static constexpr auto vertices_v = std::array{
-    Vertex{.position = {-0.5f, -0.5}, .color = {1.0f, 0.0f, 0.0f}},
-    Vertex{.position = {0.5f, -0.5},  .color = {0.0f, 1.0f, 0.0f}},
-    Vertex{.position = {0.5f, 0.5},   .color = {0.0f, 0.0f, 1.0f}},
-    Vertex{.position = {-0.5f, 0.5},  .color = {0.0f, 1.0f, 1.0f}},
-  };
-  static constexpr auto indices_v = std::array{
-    0u, 1u, 2u, 2u, 3u, 0u,
-  };
-  static constexpr auto vertices_bytes_v = to_byte_array(vertices_v);
-  static constexpr auto indices_bytes_v = to_byte_array(indices_v);
-  static constexpr auto total_bytes_v =
-    std::array<std::span<std::byte const>, 2>{
-      vertices_bytes_v,
-      indices_bytes_v,
+void App::create_shader_resources() {
+    static constexpr auto vertices_v = std::array{
+        Vertex{.position = {-200.0f, -200.0f}, .uv = {0.0f, 1.0f}},
+        Vertex{.position = {200.0f, -200.0f}, .uv = {1.0f, 1.0f}},
+        Vertex{.position = {200.0f, 200.0f}, .uv = {1.0f, 0.0f}},
+        Vertex{.position = {-200.0f, 200.0f}, .uv = {0.0f, 0.0f}},
     };
-
-  auto buffer_ci = vma::BufferCreateInfo{
-    .allocator = m_allocator.get(),
-    .usage = vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer,
-    .queue_family = m_gpu.queue_family,
-  };
-  m_vbo = vma::create_device_buffer(buffer_ci, create_command_block(), total_bytes_v);
+    static constexpr auto indices_v = std::array{
+        0u, 1u, 2u, 2u, 3u, 0u,
+    };
+    static constexpr auto vertices_bytes_v = to_byte_array(vertices_v);
+    static constexpr auto indices_bytes_v = to_byte_array(indices_v);
+    static constexpr auto total_bytes_v = std::array<std::span<std::byte const>, 2>{
+        vertices_bytes_v,
+        indices_bytes_v,
+    };
+    auto buffer_ci = vma::BufferCreateInfo{
+        .allocator = m_allocator.get(),
+        .usage = vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer,
+        .queue_family = m_gpu.queue_family,
+    };
+    m_vbo = vma::create_device_buffer(buffer_ci, create_command_block(), total_bytes_v);
+    m_view_ubo.emplace(m_allocator.get(), m_gpu.queue_family,
+                       vk::BufferUsageFlagBits::eUniformBuffer);
+    m_instance_ssbo.emplace(m_allocator.get(), m_gpu.queue_family,
+                            vk::BufferUsageFlagBits::eStorageBuffer);
+    using Pixel = std::array<std::byte, 4>;
+    static constexpr auto rgby_pixels_v = std::array{
+        Pixel{std::byte{0xff}, {}, {}, std::byte{0xff}},
+        Pixel{std::byte{}, std::byte{0xff}, {}, std::byte{0xff}},
+        Pixel{std::byte{}, {}, std::byte{0xff}, std::byte{0xff}},
+        Pixel{std::byte{0xff}, std::byte{0xff}, {}, std::byte{0xff}},
+    };
+    static constexpr auto rgby_bytes_v =
+        std::bit_cast<std::array<std::byte, sizeof(rgby_pixels_v)>>(rgby_pixels_v);
+    static constexpr auto rgby_bitmap_v = Bitmap{
+        .bytes = rgby_bytes_v,
+        .size = {2, 2},
+    };
+    auto texture_ci = Texture::CreateInfo{
+        .device = *m_device,
+        .allocator = m_allocator.get(),
+        .queue_family = m_gpu.queue_family,
+        .command_block = create_command_block(),
+        .bitmap = rgby_bitmap_v,
+    };
+    texture_ci.sampler.setMagFilter(vk::Filter::eNearest);
+    m_texture.emplace(std::move(texture_ci));
 }
 
 void App::create_cmd_block_pool() {
-  auto command_pool_ci = vk::CommandPoolCreateInfo{};
-  command_pool_ci 
-    .setQueueFamilyIndex(m_gpu.queue_family)
-    .setFlags(vk::CommandPoolCreateFlagBits::eTransient);
-  m_cmd_block_pool = m_device->createCommandPoolUnique(command_pool_ci);
-
+    auto command_pool_ci = vk::CommandPoolCreateInfo{};
+    command_pool_ci.setQueueFamilyIndex(m_gpu.queue_family)
+        .setFlags(vk::CommandPoolCreateFlagBits::eTransient);
+    m_cmd_block_pool = m_device->createCommandPoolUnique(command_pool_ci);
 }
 
 auto App::create_command_block() const -> CommandBlock {
-  return CommandBlock{*m_device, m_queue, *m_cmd_block_pool};
+    return CommandBlock{*m_device, m_queue, *m_cmd_block_pool};
 }
 
-auto App::asset_path(std::string_view const uri) const -> fs::path {
-  return m_assets_dir / uri;
+auto App::asset_path(std::string_view const uri) const -> fs::path { return m_assets_dir / uri; }
+
+void App::create_descriptor_pool() {
+    static constexpr auto pool_sizes_v = std::array{
+        vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 2},
+        vk::DescriptorPoolSize{vk::DescriptorType::eCombinedImageSampler, 2},
+        vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 2},
+    };
+    auto pool_ci = vk::DescriptorPoolCreateInfo{};
+    pool_ci.setPoolSizes(pool_sizes_v).setMaxSets(16);
+    m_descriptor_pool = m_device->createDescriptorPoolUnique(pool_ci);
+}
+
+void App::create_pipeline_layout() {
+    static constexpr auto set_0_bindings_v = std::array{
+        layout_binding(0, vk::DescriptorType::eUniformBuffer),
+    };
+    static constexpr auto set_1_bindings_v = std::array{
+        layout_binding(0, vk::DescriptorType::eCombinedImageSampler),
+    };
+    static constexpr auto set_2_bindings_v = std::array{
+        layout_binding(0, vk::DescriptorType::eStorageBuffer),
+    };
+    auto set_layout_cis = std::array<vk::DescriptorSetLayoutCreateInfo, 3>{};
+    set_layout_cis.at(0).setBindings(set_0_bindings_v);
+    set_layout_cis.at(1).setBindings(set_1_bindings_v);
+    set_layout_cis.at(2).setBindings(set_2_bindings_v);
+    for (auto const &set_layout_ci : set_layout_cis) {
+        m_set_layouts.push_back(m_device->createDescriptorSetLayoutUnique(set_layout_ci));
+        m_set_layout_views.push_back(*m_set_layouts.back());
+    }
+    auto pipeline_layout_ci = vk::PipelineLayoutCreateInfo{};
+    pipeline_layout_ci.setSetLayouts(m_set_layout_views);
+    m_pipeline_layout = m_device->createPipelineLayoutUnique(pipeline_layout_ci);
+}
+
+auto App::allocate_sets() const -> std::vector<vk::DescriptorSet> {
+    auto allocate_info = vk::DescriptorSetAllocateInfo{};
+    allocate_info.setDescriptorPool(*m_descriptor_pool).setSetLayouts(m_set_layout_views);
+    return m_device->allocateDescriptorSets(allocate_info);
+}
+
+void App::create_descriptor_sets() {
+    for (auto &descriptor_sets : m_descriptor_sets) {
+        descriptor_sets = allocate_sets();
+    }
+}
+
+void App::update_view() {
+    auto const half_size = 0.5f * glm::vec2{m_framebuffer_size};
+    auto const mat_projection = glm::ortho(-half_size.x, half_size.x, -half_size.y, half_size.y);
+    auto const mat_view = m_view_transform.view_matrix();
+    auto const mat_vp = mat_projection * mat_view;
+    auto const bytes = std::bit_cast<std::array<std::byte, sizeof(mat_vp)>>(mat_vp);
+    m_view_ubo->write_at(m_frame_index, bytes);
+}
+
+void App::update_instances() {
+    m_instance_data.clear();
+    m_instance_data.reserve(m_instances.size());
+    for (auto const &transform : m_instances) {
+        m_instance_data.push_back(transform.model_matrix());
+    }
+    auto const span = std::span{m_instance_data};
+    void *data = span.data();
+    auto const bytes = std::span{static_cast<std::byte const *>(data), span.size_bytes()};
+    m_instance_ssbo->write_at(m_frame_index, bytes);
+}
+
+void App::bind_descriptor_sets(vk::CommandBuffer const command_buffer) const {
+    auto writes = std::array<vk::WriteDescriptorSet, 3>{};
+    auto write = vk::WriteDescriptorSet{};
+    auto const &descriptor_sets = m_descriptor_sets.at(m_frame_index);
+    // Write 0
+    auto const set0 = descriptor_sets.at(0);
+    auto const view_ubo_info = m_view_ubo->descriptor_info_at(m_frame_index);
+    write.setBufferInfo(view_ubo_info)
+        .setDescriptorType(vk::DescriptorType::eUniformBuffer)
+        .setDescriptorCount(1)
+        .setDstSet(set0)
+        .setDstBinding(0);
+    writes[0] = write;
+    // Write 1
+    auto const set1 = descriptor_sets.at(1);
+    auto const image_info = m_texture->descriptor_info();
+    write.setImageInfo(image_info)
+        .setDescriptorType(vk::DescriptorType::eCombinedImageSampler)
+        .setDescriptorCount(1)
+        .setDstSet(set1)
+        .setDstBinding(0);
+    writes[1] = write;
+    // Write 2
+    auto const set2 = descriptor_sets.at(2);
+    auto const instance_ssbo_info = m_instance_ssbo->descriptor_info_at(m_frame_index);
+    write.setBufferInfo(instance_ssbo_info)
+        .setDescriptorType(vk::DescriptorType::eStorageBuffer)
+        .setDescriptorCount(1)
+        .setDstSet(set2)
+        .setDstBinding(0);
+    writes[2] = write;
+    m_device->updateDescriptorSets(writes, {});
+    command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, *m_pipeline_layout, 0,
+                                      descriptor_sets, {});
 }
 
 void App::main_loop() {
-  while (glfwWindowShouldClose(m_window.get()) == GLFW_FALSE) {
-    glfwPollEvents();
-    if(!acquire_render_target()) { continue; }
-    auto const command_buffer = begin_frame();
-    transition_for_render(command_buffer);
-    render(command_buffer);
-    transition_for_present(command_buffer);
-    submit_and_present();
-  }
+    while (glfwWindowShouldClose(m_window.get()) == GLFW_FALSE) {
+        glfwPollEvents();
+        if (!acquire_render_target()) {
+            continue;
+        }
+        auto const command_buffer = begin_frame();
+        transition_for_render(command_buffer);
+        render(command_buffer);
+        transition_for_present(command_buffer);
+        submit_and_present();
+    }
 }
 
-
-}
+} // namespace lvk

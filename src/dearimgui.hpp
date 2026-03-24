@@ -6,25 +6,25 @@
 #include "vulkan/vulkan_handles.hpp"
 #include <cstdint>
 
-namespace lvk{
+namespace lvk {
 
 struct DearImGuiCreateInfo {
-  GLFWwindow* window{};
-  std::uint32_t api_version{};
-  vk::Instance instance{};
-  vk::PhysicalDevice physical_device{};
-  std::uint32_t queue_family{};
-  vk::Device device{};
-  vk::Queue queue{};
-  vk::Format color_format{};
-  vk::SampleCountFlagBits samples{};
+    GLFWwindow *window{};
+    std::uint32_t api_version{};
+    vk::Instance instance{};
+    vk::PhysicalDevice physical_device{};
+    std::uint32_t queue_family{};
+    vk::Device device{};
+    vk::Queue queue{};
+    vk::Format color_format{};
+    vk::SampleCountFlagBits samples{};
 };
 
 class DearImGui {
   public:
     using CreateInfo = DearImGuiCreateInfo;
 
-    explicit DearImGui(CreateInfo const& create_info);
+    explicit DearImGui(CreateInfo const &create_info);
 
     void new_frame();
     void end_frame();
@@ -34,7 +34,7 @@ class DearImGui {
     enum class State : std::int8_t { Ended, Begun };
 
     struct Deleter {
-      void operator()(vk::Device device) const;
+        void operator()(vk::Device device) const;
     };
 
     State m_state{};
@@ -42,4 +42,4 @@ class DearImGui {
     Scoped<vk::Device, Deleter> m_device{};
 };
 
-}
+} // namespace lvk
